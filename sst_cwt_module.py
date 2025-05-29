@@ -8,6 +8,7 @@
 日期: 2025年5月28日
 """
 
+from unittest import result
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
@@ -119,7 +120,7 @@ class SST_Base:
                 result = self.sst_result
             title = kwargs.get("title", "SST时频图")
         else:
-            raise ValueError("type参数必须为'transform'或'st'")
+            raise ValueError("type参数必须为'transform'或'sst'")
         kwargs.pop("title", None)  # 移除title参数以避免重复
         self._plot_tf_map(
             result["t_Axis"], result["f_Axis"], result["tf_map"], title=title, **kwargs
@@ -177,7 +178,9 @@ class SST_CWT(SST_Base):
         gamma: float = 1e-1,
         fb: float = 5,
         isSmooth: bool = True,
+        smooth_param: Optional[Dict[str, Any]] = None,
         isNumba: bool = False,
+        isDebug: bool = False,
     ) -> None:
         """
         初始化CWT-SST对象
@@ -189,7 +192,9 @@ class SST_CWT(SST_Base):
             gamma: 幅值阈值，用于过滤弱信号
             fb: 时频线宽度 (Hz)，用于脊线提取
             isSmooth: 是否对SST结果进行平滑处理
+            smooth_param: 平滑参数字典，包含平滑方法和参数
             isNumba: 是否使用Numba加速能量重排
+            isDebug: 是否开启调试模式，绘制调试图
         """
         # 默认CWT参数
         transform_param = {
@@ -198,15 +203,25 @@ class SST_CWT(SST_Base):
             "scalesType": "log",  # 默认尺度范围
             "scalesNum": 500,  # 默认尺度数量
         }
+        # 默认平滑参数
+        self.smooth_param ={
+            "method": "morph",  # 平滑方法
+            "sigma": 3,
+            "morph_shape": len(signal)//500,
+            "morph_type": "open",
+        }
         if cwt_param is not None:
             transform_param.update(cwt_param)
+        if smooth_param is not None:
+            self.smooth_param.update(smooth_param)
         super().__init__(signal, fs, transform_param, gamma, fb)
         # 检查是否安装了Numba
         if isNumba:
-            self.has_numba = self._check_numba()
+            self.isNumba = self._check_numba()
         else:
-            self.has_numba = False
+            self.isNumba = False
         self.isSmooth = isSmooth  # 是否对SST结果平滑处理
+        self.isDebug = isDebug  # 是否开启调试模式
 
     def _check_numba(self) -> bool:
         """
@@ -272,7 +287,7 @@ class SST_CWT(SST_Base):
 
         # --------- 1. 边界填充 ---------
         pad_len = len(data) // 10
-        data_padded = np.pad(data, pad_width=pad_len, mode="constant")
+        data_padded = np.pad(data, pad_width=pad_len, mode="reflect")
         # --------- 2. 生成尺度 ---------
         scales = transform_param["scales"]
         scalesType = transform_param["scalesType"]
@@ -280,7 +295,7 @@ class SST_CWT(SST_Base):
         if scales is None:
             scales = self._get_cwt_scales(fs, len(data), scalesType, scalesNum)
         wavelet = transform_param["wavelet"]  # 小波类型
-        t_Axis = np.arange(len(data)) / fs  # 时间轴
+        t_Axis = np.arange(len(data)) / fs  # 时间轴, cwt默认最小间隔时延
         # --------- 3. 计算CWT ---------
         coeffs, f_Axis = cwt(
             data=data_padded,
@@ -289,6 +304,7 @@ class SST_CWT(SST_Base):
             sampling_period=t_Axis[1],
             method="fft",
         )
+
         # --------- 4. 处理结果 ---------
         coeffs = coeffs[::-1, pad_len:-pad_len]  # # 反转系数顺序并去除填充部分
         f_Axis = f_Axis[::-1]  # 频率轴调整为增大
@@ -302,6 +318,28 @@ class SST_CWT(SST_Base):
             "tf_map": coeffs,
             "scales": scales,
         }
+        self.transform_result = result  # 存储变换结果
+        if self.isDebug:
+            # 可视化f_Axis的划分情况（线性坐标，频率分布直方图+采样点）
+            plt.figure(figsize=(10, 3))
+            plt.subplot(2, 1, 1)
+            plt.scatter(f_Axis, np.zeros_like(f_Axis), s=10, label="频率采样点")
+            plt.xlabel("频率/Hz")
+            plt.yticks([])
+            plt.title("CWT频率轴采样点分布（线性坐标）")
+            plt.grid(True, axis="x", which="both", linestyle="--", alpha=0.5)
+            plt.legend()
+            # 频率间隔直方图
+            plt.subplot(2, 1, 2)
+            df = np.diff(f_Axis)
+            plt.plot(f_Axis[1:], df, marker='o', linestyle='-', label="相邻频率间隔")
+            plt.xlabel("频率/Hz")
+            plt.ylabel("Δf (Hz)")
+            plt.title("相邻频率采样间隔")
+            plt.grid(True, linestyle="--", alpha=0.5)
+            plt.legend()
+            plt.tight_layout()
+            plt.show()
         return result
 
     @staticmethod
@@ -346,8 +384,26 @@ class SST_CWT(SST_Base):
             freq_remap = self.__calc_inst_freq_phaseGrad(C_x, t)
         else:
             raise ValueError("未知的瞬时频率计算方法")
+        freq_remap = np.asarray(freq_remap)
+        self.inst_freq = freq_remap
+        if self.isDebug:
+            # 可视化瞬时频率与真实频率轴的差距热力图（正负，nan处为0）
+            f_Axis = self.transform_result["f_Axis"]
+            # 计算每个点的频率差（带正负），nan处为0
+            freq_diff = freq_remap - f_Axis[:, None]
+            freq_diff = np.where(np.isnan(freq_remap), 0, freq_diff)
+            plt.figure(figsize=(8, 6))
+            mesh = plt.pcolormesh(
+            t, f_Axis, freq_diff, shading="auto", cmap="seismic", vmin=-20, vmax=20
+            )
+            plt.colorbar(mesh, label="瞬时频率 - 真实频率 (Hz)")
+            plt.xlabel("时间/s")
+            plt.ylabel("频率/Hz")
+            plt.title("SST瞬时频率与原始频率差距热力图（正负）")
+            plt.tight_layout()
+            plt.show()
 
-        return np.asarray(freq_remap)
+        return freq_remap
 
     def __calc_inst_freq_gradRatio(self, C_x: np.ndarray, t: np.ndarray) -> np.ndarray:
         """
@@ -470,11 +526,13 @@ class SST_CWT(SST_Base):
                 # 一维向量按目标索引向二维矩阵向量化累加操作
                 np.add.at(sst_tf_map, (freq_indices, time_indices), valid_coeffs)
 
-        return {
+        result = {
             "f_Axis": self.transform_result["f_Axis"],  # 保持与原始CWT一致的轴
             "t_Axis": self.transform_result["t_Axis"],
             "tf_map": sst_tf_map,
         }
+        self.sst_result = result  # 存储SST结果
+        return result
 
     def energy_reassign_numba(self) -> Dict[str, Any]:
         """
@@ -530,14 +588,17 @@ class SST_CWT(SST_Base):
             self.transform_result["f_Axis"],
         )
 
-        return {
+        result = {
             "f_Axis": self.transform_result["f_Axis"],
             "t_Axis": self.transform_result["t_Axis"],
             "tf_map": sst_tf_map,
         }
+        self.sst_result = result  # 存储SST结果
+        return result
 
+    @staticmethod
     def smooth_2D(
-        self, data2D: np.ndarray, smooth_param: Optional[Dict[str, Any]] = None
+        data2D: np.ndarray, smooth_param: Dict[str, Any]
     ) -> np.ndarray:
         """
         对2D时频图进行平滑处理
@@ -549,20 +610,11 @@ class SST_CWT(SST_Base):
         返回:
             平滑后的时频图
         """
-        # 默认参数
-        default_param = {
-            "method": "gaussian",
-            "sigma": 3,
-            "morph_shape": 3,
-            "morph_type": "open",
-        }
-        if smooth_param is not None:
-            default_param.update(smooth_param)
-        method = default_param["method"]
+        method = smooth_param["method"]
         if method == "gaussian":
             from scipy.ndimage import gaussian_filter  # 高斯滤波
 
-            return gaussian_filter(data2D, sigma=default_param["sigma"])
+            return gaussian_filter(data2D, sigma=smooth_param["sigma"])
         elif method == "morph":
             from skimage.morphology import (  # 形态学处理
                 footprint_rectangle,
@@ -572,14 +624,14 @@ class SST_CWT(SST_Base):
             )
 
             selem = footprint_rectangle(
-                (1, default_param["morph_shape"])
+                (1, smooth_param["morph_shape"])
             )  # 创建长条结构元素
             abs_data = np.abs(data2D)
-            if default_param["morph_type"] == "erosion":
+            if smooth_param["morph_type"] == "erosion":
                 filtered = erosion(abs_data, selem)
-            elif default_param["morph_type"] == "open":
+            elif smooth_param["morph_type"] == "open":
                 filtered = opening(abs_data, selem)
-            elif default_param["morph_type"] == "close":
+            elif smooth_param["morph_type"] == "close":
                 filtered = closing(abs_data, selem)
             else:
                 raise ValueError("morph_type must be 'open' or 'close'")
@@ -602,34 +654,33 @@ class SST_CWT(SST_Base):
             if self.inst_freq is None:
                 # 执行时频变换
                 if self.transform_result is None:
-                    self.transform_result = self.transform(
-                        self.signal, self.fs, self.transform_param
-                    )
-                self.inst_freq = self.calc_inst_freq()
+                    self.transform(self.signal, self.fs, self.transform_param)
+                self.calc_inst_freq()
             # 执行能量重排
-            if self.has_numba:
+            if self.isNumba:
                 try:
-                    self.sst_result = self.energy_reassign_numba()
+                    self.energy_reassign_numba()
                 except Exception as e:  # numba加速失败,
                     print(
                         "Numba加速失败，使用默认能量重排方法: ",
                         e,
                     )
-                    self.sst_result = self.energy_reassign()
+                    self.energy_reassign()
             else:
-                self.sst_result = self.energy_reassign()
+                self.energy_reassign()
         # 平滑处理
         if self.isSmooth:
             smoothed_tf_map = self.smooth_2D(
                 self.sst_result["tf_map"],
                 # 根据调频调幅信号模型, 进行线条形态学滤波
-                smooth_param={
-                    "method": "morph",
-                    "morph_shape": self.sst_result["t_Axis"].size // 500,
-                    "morph_type": "open",
-                },
+                smooth_param=self.smooth_param
             )
             self.sst_result["tf_map"] = smoothed_tf_map
+        if self.isDebug:
+            # 绘制CWT结果
+            self.plot(type="transform")
+            # 绘制SST结果
+            self.plot(type="sst", title=f"SST时频图(稀疏提升: {self.evaluate():.2f})")
         return self.sst_result
 
     def evaluate(self) -> float:
@@ -654,7 +705,6 @@ class SST_CWT(SST_Base):
         amp_thresh_ratio: float = 0.1,
         db_eps: float = 5,
         db_min_samples: int = 10,
-        plot: bool = False,
     ) -> List[np.ndarray]:
         """
         基于DBSCAN聚类的SST频率脊线自动提取
@@ -682,22 +732,6 @@ class SST_CWT(SST_Base):
         amp_thresh = amp_thresh_ratio * np.max(tf_map)
         idx_f, idx_t = np.where(tf_map > amp_thresh)
         points = np.stack([idx_t, idx_f], axis=1)  # 修改为[时间索引, 频率索引]
-        if plot:
-            # 转为真实频率和时间值
-            points_tf = np.array([[t_Axis[t], f_Axis[f]] for t, f in points])
-            # 绘制提取的点
-            plt.figure(figsize=(8, 6))
-            plt.scatter(
-                points_tf[:, 0], points_tf[:, 1], s=10, c="blue", label="提取点"
-            )
-            plt.xlabel("时间/s")
-            plt.ylabel("频率/Hz")
-            plt.title("有效待聚类点")
-            plt.xlim(0, t_Axis[-1])
-            plt.ylim(0, f_Axis[-1])
-            plt.grid()
-            plt.tight_layout()
-            plt.show()
 
         # 2. DBSCAN聚类提取频率线
         if len(points) == 0:
@@ -710,41 +744,14 @@ class SST_CWT(SST_Base):
         points_scaled[:, 1] *= freq_weight
         db = DBSCAN(eps=db_eps, min_samples=db_min_samples, metric="euclidean")
         labels = db.fit_predict(points_scaled)
-        if plot:
-            # 绘制聚类结果
-            unique_labels = sorted(set(labels))
-            plt.figure(figsize=(8, 6))
-            # 使用tab10或tab20色图，区分度更高
-            color_map = plt.get_cmap("tab10" if len(unique_labels) <= 10 else "tab20")
-            for idx, label in enumerate(unique_labels):
-                if label == -1:
-                    color = "gray"
-                else:
-                    color = color_map(idx % color_map.N)
-                cluster_points = points_tf[labels == label]
-                plt.scatter(
-                    cluster_points[:, 0],
-                    cluster_points[:, 1],
-                    s=5,
-                    color=color,
-                    label=f"聚类组 {label}" if label != -1 else "噪声点",
-                )
-            plt.xlabel("时间/s")
-            plt.ylabel("频率/Hz")
-            plt.title("DBSCAN聚类结果")
-            plt.xlim(0, t_Axis[-1])
-            plt.ylim(0, f_Axis[-1])
-            plt.grid()
-            plt.legend()
-            plt.tight_layout()
-            plt.show()
+        # 3. 分别处理每条频率脊线
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         ridges_freqs = []
         for cluster_id in range(n_clusters):
             mask = labels == cluster_id
             cluster_points = points[mask]
 
-            # 3. 按时间分组，统计每个时刻的真实频率
+            # 4. 按时间分组，统计每个时刻的真实频率
             ridge_freq = np.full(T, np.nan)
             time_indices = []
             freq_values = []
@@ -759,7 +766,7 @@ class SST_CWT(SST_Base):
                 time_indices.append(t)
                 freq_values.append(freq_val)
 
-            # 4. 使用中值滤波, 去除异常频率
+            # 5. 使用中值滤波, 去除异常频率
             if len(time_indices) > 3:
                 from scipy.signal import medfilt
 
@@ -769,8 +776,64 @@ class SST_CWT(SST_Base):
                 for i, t in enumerate(time_indices):
                     ridge_freq[t] = filtered_freqs[i]
             ridges_freqs.append(ridge_freq)
-        return ridges_freqs
+            ridge_freq = np.asarray(ridge_freq)
+        if self.isDebug:
+            # 转为真实频率和时间值
+            points_tf = np.array([[t_Axis[t], f_Axis[f]] for t, f in points])
+            unique_labels = sorted(set(labels))
+            color_map = plt.get_cmap("tab10" if len(unique_labels) <= 10 else "tab20")
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
+            # 子图1：提取的点
+            axes[0].scatter(points_tf[:, 0], points_tf[:, 1], s=10, c="blue", label="提取点")
+            axes[0].set_xlabel("时间/s")
+            axes[0].set_ylabel("频率/Hz")
+            axes[0].set_title("有效待聚类点")
+            axes[0].set_xlim(0, t_Axis[-1])
+            axes[0].set_ylim(0, f_Axis[-1])
+            axes[0].grid()
+            axes[0].legend()
+
+            # 子图2：聚类结果
+            for idx, label in enumerate(unique_labels):
+                if label == -1:
+                    color = "gray"
+                else:
+                    color = color_map(idx % color_map.N)
+                cluster_points = points_tf[labels == label]
+                axes[1].scatter(
+                    cluster_points[:, 0],
+                    cluster_points[:, 1],
+                    s=10,
+                    color=color,
+                    label=f"聚类组 {label}" if label != -1 else "噪声点",
+                )
+                
+            # 添加提取的频率脊线
+            for i, ridge_freq in enumerate(ridges_freqs):
+                valid_indices = ~np.isnan(ridge_freq)
+                if not np.any(valid_indices):
+                    continue
+                    
+                axes[1].plot(
+                    t_Axis[valid_indices], 
+                    ridge_freq[valid_indices],
+                    linewidth=2,
+                    linestyle='-',
+                    color="black",
+                )
+                
+            axes[1].set_xlabel("时间/s")
+            axes[1].set_ylabel("频率/Hz")
+            axes[1].set_title("DBSCAN聚类结果与提取的频率脊线")
+            axes[1].set_xlim(0, t_Axis[-1])
+            axes[1].set_ylim(0, f_Axis[-1])
+            axes[1].grid()
+            # 使用小图例避免遮挡图形
+            axes[1].legend(loc='upper right', fontsize='small')
+            plt.tight_layout()
+            plt.show()
+        return ridges_freqs
     @staticmethod
     def _freqs_to_idx(
         fc: np.ndarray, fb: np.ndarray, f_Axis: np.ndarray
@@ -838,14 +901,13 @@ class SST_CWT(SST_Base):
                 cc=fc_list.T,
                 cw=fb_list.T,
             )
-            return recons
         # 手动指定频率范围进行分离重构
         elif fc is None or fb is None:  # 不分离, 完整重构
             recons = issq_cwt(
                 Tx=self.sst_result["tf_map"],
                 wavelet="morlet",
             )
-            return np.asarray([recons])  # 保持完整重构与分离重构输出形状一致
+            recons=np.asarray([recons])  # 保持完整重构与分离重构输出形状一致
         else:  # 分离重构
             if fc.ndim == 1 and fb.ndim == 1:
                 fc = fc.reshape(1, -1)
@@ -862,21 +924,45 @@ class SST_CWT(SST_Base):
                 )
             else:
                 raise ValueError("fc和fb的时间轴长度必须与SST结果的时间轴长度相同")
+        if self.isDebug:
+            # 绘制原始信号和每个分量、残差以及重构信号的时域波形图
+            n_comp = recons.shape[0]
+            fig, axes = plt.subplots(n_comp + 2, 1, figsize=(10, 2.5 * (n_comp + 3)), sharex=True)
+            t = t_Axis
+            # 原始信号
+            axes[0].plot(t, self.signal, color="k")
+            axes[0].set_ylabel("幅值")
+            axes[0].set_title("原始信号")
+            # 各分量
+            for i in range(n_comp-1):
+                axes[i + 1].plot(t, recons[i])
+                axes[i + 1].set_ylabel("幅值")
+                axes[i + 1].set_title(f"SST提取分量{i+1}")            # 残差
+            residual = recons[-1]  # 最后一个分量为残差
+            axes[-2].plot(t, residual, label="残差", color="r")
+            axes[-2].set_ylabel("幅值")
+            axes[-2].set_title("残差")
+            # 所有分量合成信号
+            synth = np.sum(recons[:-1], axis=0)# 不包括残差
+            axes[-1].plot(t, synth, color="b")
+            axes[-1].set_ylabel("幅值")
+            axes[-1].set_title("分量重构信号")
+            axes[-1].set_xlabel("时间/s")
+            plt.tight_layout()
+            plt.show()
         return recons
 
 
 def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
     """
-    测试SST_CWT算法在谐波调频信号上的分离重构能力
-
+    开启SST_CWT调试模式，测试SST_CWT算法在谐波调频信号上的分离重构能力
+    中间过程直接展示, 最终结果保存为图片
     仿真信号为基频100Hz+正弦调频，含1、2倍频谐波
-    进行CWT和SST分析，自动分离重构分量，并分别对重构分量做CWT
-    展示4张图：原始信号、原始信号CWT、分量1 CWT、分量2 CWT
 
     返回:
         配置好的SST_CWT对象实例
     """
-    print("测试SST_CWT谐波分离重构...")
+    print("测试SST_CWT:")
 
     # 生成测试信号
     fs = 2000
@@ -897,37 +983,35 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
     signal = sig1 + sig2
 
     # 初始化SST_CWT
-    sst = SST_CWT(signal, fs)# 测试默认参数配置
+    sst = SST_CWT(signal, fs,isDebug=True)  # 测试默认参数配置
 
     # 执行CWT变换
-    sst.transform_result = sst.transform(signal, fs, sst.transform_param)
-    print("原始信号CWT计算完成")
+    print("开始测试SST_CWT.transform()方法...")
+    sst.transform(signal, fs, sst.transform_param)
+    print("SST_CWT.transform()方法测试完成")
 
     # 执行SST变换
+    print("开始测试SST_CWT.sst()方法...")
     sst.sst()
     sst.sst_result["tf_map"] *= 0.2  # 缩放幅值, 抵消压缩带来的幅值变化
-    print("原始信号SST计算完成")
-
-    # 评估SST效果
-    sparsity_ratio = sst.evaluate()
-    print(f"SST时频图稀疏度提升比例: {sparsity_ratio:.4f}")
+    print("SST_CWT.sst()方法测试完成")
 
     # 自动分离重构
+    print("开始测试SST_CWT.reconstruct()方法...")
     recons = sst.reconstruct(automode=True)[:-1]  # 最后一个分量为残差
-    print("自动分离重构完成")
-    print(f"分离模态数量: {len(recons)}")
+    print("SST_CWT.reconstruct()方法测试完成")
+
+    # 设置调试模式为False
+    sst.isDebug = False
 
     # 对个分量分别做CWT
     def get_cwt(sig):
         return sst.transform(sig, fs, sst.transform_param)
 
     cwt_rec1 = get_cwt(recons[0])
-    print("分量1 CWT计算完成")
     cwt_rec2 = get_cwt(recons[1])
-    print("分量2 CWT计算完成")
 
-    # 绘制结果
-    print("开始绘制结果...")
+    # 绘制结果并保存
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     VMAX = 0.5
     # 原始信号CWT
@@ -991,9 +1075,9 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
     axes[1, 1].set_ylim(0, 300)
     fig.colorbar(mesh4, ax=axes[1, 1], label="幅值")
     plt.tight_layout()
-    plt.show()
+    plt.savefig("TEST-SST_CWT.png", dpi=300)
 
-    print("SST_CWT谐波分离重构测试完成！")
+    print("SST_CWT测试通过！")
     return sst
 
 
