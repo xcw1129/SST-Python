@@ -8,7 +8,6 @@
 日期: 2025年5月28日
 """
 
-from unittest import result
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
