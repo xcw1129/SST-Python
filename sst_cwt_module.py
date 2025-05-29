@@ -479,20 +479,31 @@ class SST_CWT(SST_Base):
         def __energy_reassign_numba_core(inst_freq, tf_map, f_axis):
             n_freq, n_time = tf_map.shape
             sst_tf_map = np.zeros_like(tf_map)
+            f_min = f_axis[0]
+            f_max = f_axis[-1]
             for i in range(n_freq):
                 for j in range(n_time):
                     freq_remap = inst_freq[i, j]
-                    if not np.isnan(freq_remap):
-                        # 找到最近的频率索引
+                    if np.isnan(freq_remap):
+                        continue
+                    # 跳过超出频率轴范围的点
+                    if freq_remap < f_min or freq_remap > f_max:
+                        continue
+                    # 利用增序f_axis快速定位最近索引
+                    idx = np.searchsorted(f_axis, freq_remap, side="left")
+                    if idx == 0:
                         freq_idx = 0
-                        min_dist = abs(f_axis[0] - freq_remap)
-                        for k in range(1, len(f_axis)):
-                            dist = abs(f_axis[k] - freq_remap)
-                            if dist < min_dist:
-                                min_dist = dist
-                                freq_idx = k
-                        # 累加系数
-                        sst_tf_map[freq_idx, j] += tf_map[i, j]
+                    elif idx >= len(f_axis):
+                        freq_idx = len(f_axis) - 1
+                    else:
+                        # 比较左右邻居距离
+                        left = idx - 1
+                        right = idx
+                        if abs(f_axis[left] - freq_remap) <= abs(f_axis[right] - freq_remap):
+                            freq_idx = left
+                        else:
+                            freq_idx = right
+                    sst_tf_map[freq_idx, j] += tf_map[i, j]
             return sst_tf_map
 
         # 使用 Numba 加速的核心函数
