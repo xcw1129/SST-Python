@@ -223,7 +223,7 @@ class SST_CWT(SST_Base):
             return False
 
     @staticmethod
-    def _get_cwt_scales(fs: float, scalesType: str, scalesNum: int) -> np.ndarray:
+    def _get_cwt_scales(fs: float,N:int, scalesType: str, scalesNum: int) -> np.ndarray:
         """
         根据尺度类型和数量生成CWT尺度
 
@@ -235,16 +235,20 @@ class SST_CWT(SST_Base):
         返回:
             CWT尺度数组
         """
+        fn= fs / 2  # Nyquist频率
+        f_min=5*fs / N  # 最小频率, 保证有意义的尺度
+        # f: 5Δf~ fn
         if scalesType == "log":
-            log_fn = np.log10(fs / 2)
+            log_fn = np.log10(fn)
+            log_f_min=np.log10(f_min) 
             log_f_Axis = np.linspace(
-                log_fn - np.log10(200), log_fn, scalesNum
-            )  # f= fn/200~fn
+                log_f_min, log_fn, scalesNum
+            )
             f_Axis = np.power(10, log_f_Axis)  # 生成对数尺度
             scales = fs / f_Axis[::-1]  # 计算增序尺度
             return scales
         elif scalesType == "linear":
-            f_Axis = np.linspace(fs / 2 / 1000, fs / 2, scalesNum)
+            f_Axis = np.linspace(f_min, fn, scalesNum)
             scales = fs / f_Axis[::-1]
             return scales
         else:
@@ -268,13 +272,13 @@ class SST_CWT(SST_Base):
 
         # --------- 1. 边界填充 ---------
         pad_len = len(data) // 10
-        data_padded = np.pad(data, pad_width=pad_len, mode="symmetric")
+        data_padded = np.pad(data, pad_width=pad_len, mode="constant")
         # --------- 2. 生成尺度 ---------
         scales = transform_param["scales"]
         scalesType = transform_param["scalesType"]
         scalesNum = transform_param["scalesNum"]
         if scales is None:
-            scales = self._get_cwt_scales(fs, scalesType, scalesNum)
+            scales = self._get_cwt_scales(fs,len(data), scalesType, scalesNum)
         wavelet = transform_param["wavelet"]  # 小波类型
         t_Axis = np.arange(len(data)) / fs  # 时间轴
         # --------- 3. 计算CWT ---------
@@ -363,13 +367,15 @@ class SST_CWT(SST_Base):
         magnitude = np.abs(C_x)
         threshold = self.gamma * np.max(magnitude)
         mask = magnitude >= threshold
-
+        
         # 计算瞬时频率
-        ratio = np.zeros_like(C_x, dtype=complex)
-        ratio[mask] = dC_x[mask] / C_x[mask]
-        freq_remap = np.imag(ratio) / (2 * np.pi)
-        freq_remap[~mask] = np.nan
-
+        freq_remap = np.full_like(C_x, np.nan, dtype=float)
+        if np.any(mask):
+            inst_freq = np.imag(dC_x[mask] / C_x[mask]) / (2 * np.pi)
+            # 频率合理性检查
+            valid_freq_mask = (inst_freq > 0) & (inst_freq < self.fs / 2)
+            freq_remap[mask] = np.where(valid_freq_mask, inst_freq, np.nan)
+        
         return freq_remap
 
     def __calc_inst_freq_phaseGrad(self, C_x: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -420,44 +426,35 @@ class SST_CWT(SST_Base):
             # 如果没有有效点，返回零矩阵
             sst_tf_map = np.zeros_like(self.transform_result["tf_map"], dtype=complex)
         else:
-            # 提取二维数组中有效的频率和系数, 并一维化加快循环速度
-            valid_freq_remap = self.inst_freq[valid_mask]
-            valid_coeffs = self.transform_result["tf_map"][valid_mask]
-
-            # 获取有效点的二维索引
-            valid_indices = np.where(valid_mask)
-            time_indices = valid_indices[1]  # 时间索引
-
-            # 向量化计算最近的左侧频率索引
-            freq_indices = np.searchsorted(
-                self.transform_result["f_Axis"], valid_freq_remap, side="left"
-            )
-
-            # 处理不在有效频率轴范围内的点
-            freq_indices = np.clip(
-                freq_indices, 0, len(self.transform_result["f_Axis"]) - 1
-            )
-
-            # 左侧频率索引改为最近邻索引
-            for i in range(len(freq_indices)):
-                if freq_indices[i] > 0:
-                    left_dist = abs(
-                        valid_freq_remap[i]
-                        - self.transform_result["f_Axis"][freq_indices[i] - 1]
-                    )
-                    right_dist = abs(
-                        valid_freq_remap[i]
-                        - self.transform_result["f_Axis"][freq_indices[i]]
-                    )
-                    if left_dist < right_dist:
-                        freq_indices[i] -= 1
-
-            # 初始化SST矩阵
-            sst_tf_map = np.zeros_like(self.transform_result["tf_map"], dtype=complex)
-
-            # 一维向量按目标索引向二维矩阵向量化累加操作
-            np.add.at(sst_tf_map, (freq_indices, time_indices), valid_coeffs)
-
+            # 预过滤频率范围
+            f_min, f_max = self.transform_result["f_Axis"][0], self.transform_result["f_Axis"][-1]
+            freq_range_mask = (self.inst_freq >= f_min) & (self.inst_freq <= f_max)
+            valid_mask = valid_mask & freq_range_mask
+            
+            if not np.any(valid_mask):
+                sst_tf_map = np.zeros_like(self.transform_result["tf_map"], dtype=complex)
+            else:
+                valid_freq_remap = self.inst_freq[valid_mask]
+                valid_coeffs = self.transform_result["tf_map"][valid_mask]
+                valid_indices = np.where(valid_mask)
+                time_indices = valid_indices[1]
+                
+                # 查找最近的频率索引
+                freq_indices = np.searchsorted(
+                    self.transform_result["f_Axis"], valid_freq_remap, side="left"
+                )
+                freq_indices = np.clip(freq_indices, 0, len(self.transform_result["f_Axis"]) - 1)
+                
+                # 向量化最近邻计算
+                left_indices = np.maximum(freq_indices - 1, 0)
+                left_dist = np.abs(valid_freq_remap - self.transform_result["f_Axis"][left_indices])
+                right_dist = np.abs(valid_freq_remap - self.transform_result["f_Axis"][freq_indices])
+                freq_indices = np.where(left_dist < right_dist, left_indices, freq_indices)
+                
+                sst_tf_map = np.zeros_like(self.transform_result["tf_map"], dtype=complex)
+                # 一维向量按目标索引向二维矩阵向量化累加操作
+                np.add.at(sst_tf_map, (freq_indices, time_indices), valid_coeffs)
+        
         return {
             "f_Axis": self.transform_result["f_Axis"],  # 保持与原始CWT一致的轴
             "t_Axis": self.transform_result["t_Axis"],
@@ -717,29 +714,23 @@ class SST_CWT(SST_Base):
 
             # 3. 按时间分组，统计每个时刻的真实频率
             ridge_freq = np.full(T, np.nan)
-            for t in np.unique(cluster_points[:, 0]):  # 无聚类点的时刻频率为nan
-                freq_idx = cluster_points[cluster_points[:, 0] == t, 1]
-                freq_val = np.median(f_Axis[freq_idx])  # 中位频率，抗干扰
+            time_indices = []
+            freq_values = []
+            for t in np.unique(cluster_points[:, 0]): # 无聚类点的时刻频率为nan
+                freq_idx = cluster_points[cluster_points[:, 0] == t, 1]# 提取同一时刻所有点频率索引
+                # 使用加权平均，权重为对应点的幅值
+                weights = tf_map[freq_idx, t]
+                freq_val = np.average(f_Axis[freq_idx], weights=weights)
                 ridge_freq[t] = freq_val
+                time_indices.append(t)
+                freq_values.append(freq_val)
 
-            # 4. 去除异常跳变点
-            valid_idx = np.where(~np.isnan(ridge_freq))[0]
-            for i in range(1, len(valid_idx)):
-                if (
-                    abs(ridge_freq[valid_idx[i]] - ridge_freq[valid_idx[i - 1]])
-                    > self.fb
-                ):
-                    # 异常点，用相邻均值替代
-                    ridge_freq[valid_idx[i]] = np.nanmean(
-                        [
-                            ridge_freq[valid_idx[i - 1]],
-                            (
-                                ridge_freq[valid_idx[i + 1]]
-                                if i + 1 < len(valid_idx)
-                                else ridge_freq[valid_idx[i - 1]]
-                            ),
-                        ]
-                    )
+            # 4. 使用中值滤波, 去除异常频率
+            if len(time_indices) > 3:
+                from scipy.signal import medfilt
+                filtered_freqs = medfilt(np.array(freq_values), kernel_size=min(5, len(freq_values)))
+                for i, t in enumerate(time_indices):
+                    ridge_freq[t] = filtered_freqs[i]
             ridges_freqs.append(ridge_freq)
         return ridges_freqs
 
