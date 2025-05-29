@@ -1,37 +1,44 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 同步压缩变换SST_CWT算法模块
 
 该模块实现了基于连续小波变换(CWT)的同步压缩变换算法。
 主要包含SST_Base基类和SST_CWT实现类。
 
-作者: 课题组
+作者: xcw
 日期: 2025年5月28日
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
-import scipy.integrate
-from sklearn.preprocessing import scale
+from typing import Dict, List, Union, Optional, Tuple, Any
 
 
 class SST_Base:
     """
     同步压缩变换基类
+
+    提供SST算法的基础框架，包括时频变换、瞬时频率计算和能量重排等核心步骤。
+    子类需要实现具体的变换方法。
     """
 
-    def __init__(self, signal, fs, transform_param, gamma,fb):
+    def __init__(
+        self,
+        signal: np.ndarray,
+        fs: float,
+        transform_param: Dict[str, Any],
+        gamma: float,
+        fb: float,
+    ) -> None:
         """
         初始化SST基类
 
         参数:
-            signal: 输入信号
-            fs: 采样频率
-            transform_param: 变换参数
-            gamma: 阈值参数
-            fb: 时频线宽度
+            signal: 输入信号，一维数组
+            fs: 采样频率 (Hz)
+            transform_param: 变换参数字典
+            gamma: 瞬时频率计算时的幅值阈值
+            fb: 时频线宽度 (Hz)
         """
         # 字体和绘图全局设置
         plt.rcParams["font.family"] = "sans-serif"
@@ -45,49 +52,62 @@ class SST_Base:
         self.fs = fs
         self.transform_param = transform_param
         self.gamma = gamma
-        self.fb= fb
+        self.fb = fb
 
         # 结果存储
         self.transform_result = None
         self.inst_freq = None
         self.sst_result = None
 
-    def transform(self):
+    def transform(self) -> Dict[str, Any]:
         """
-        执行时频变换 - 抽象方法，子类必须实现
+        执行时频变换
+
+        返回:
+            时频变换结果字典，包含时间轴、频率轴和时频图
         """
         raise NotImplementedError("子类必须实现transform方法")
 
-    def calc_inst_freq(self):
+    def calc_inst_freq(self) -> np.ndarray:
         """
-        计算瞬时频率 - 抽象方法，子类必须实现
+        计算瞬时频率
+
+        返回:
+            瞬时频率矩阵，形状为 (n_freq, n_time)
         """
         raise NotImplementedError("子类必须实现calc_inst_freq方法")
 
-    def energy_reassign(self):
+    def energy_reassign(self) -> Dict[str, Any]:
         """
-        能量重排算法 - 抽象方法，子类必须实现
+        能量重排算法
+
+        将时频系数按计算得到的瞬时频率重新分配到对应频率位置
+
+        返回:
+            重排后的时频图字典
         """
         raise NotImplementedError("子类必须实现energy_reassign方法")
-    
-    def sst(self):
+
+    def sst(self) -> Dict[str, Any]:
         """
         执行完整的SST变换
+
+        返回:
+            SST变换结果字典，包含时间轴、频率轴和压缩后的时频图
         """
         raise NotImplementedError("子类必须实现sst方法")
 
-    def plot(self, type="sst", **kwargs):
+    def plot(self, type: str = "sst", **kwargs) -> None:
         """
-        绘制时频图。
+        绘制时频图
+
         参数:
-            type: 'transform' 或 'sst'
-            **kwargs: 其他matplotlib绘图参数
+            type: 绘图类型，'transform' 或 'sst'
+            **kwargs: matplotlib绘图参数
         """
         if type == "transform":
             if self.transform_result is None:
-                result = self.transform(
-                    self.signal, self.fs, self.transform_param
-                )
+                result = self.transform(self.signal, self.fs, self.transform_param)
                 self.transform_result = result
             else:
                 result = self.transform_result
@@ -99,14 +119,24 @@ class SST_Base:
                 result = self.sst_result
             title = kwargs.get("title", "SST时频图")
         else:
-            raise ValueError("type参数必须为'transform'或'sst'")
+            raise ValueError("type参数必须为'transform'或'st'")
         kwargs.pop("title", None)  # 移除title参数以避免重复
-        self._plot_tf_map(result["t_Axis"], result["f_Axis"],result["tf_map"], title=title, **kwargs)
+        self._plot_tf_map(
+            result["t_Axis"], result["f_Axis"], result["tf_map"], title=title, **kwargs
+        )
 
     @staticmethod
-    def _plot_tf_map(t, f, tf_map, **kwargs):
+    def _plot_tf_map(
+        t: np.ndarray, f: np.ndarray, tf_map: np.ndarray, **kwargs
+    ) -> None:
         """
-        绘制时频图（内部方法）。
+        绘制时频图的内部方法
+
+        参数:
+            t: 时间轴
+            f: 频率轴
+            tf_map: 时频图矩阵
+            **kwargs: matplotlib绘图参数
         """
         plt.figure(figsize=kwargs.get("figsize", (8, 6)))
         mesh = plt.pcolormesh(
@@ -134,19 +164,31 @@ class SST_Base:
 class SST_CWT(SST_Base):
     """
     基于CWT的同步压缩变换
+
+    使用连续小波变换作为基础时频分析方法，通过瞬时频率计算和能量重排
+    实现时频表示的压缩，提高时频分辨率。
     """
 
-    def __init__(self, signal, fs, cwt_param=None, gamma=1e-3,fb=5, isSmooth=False,isNumba=False):
+    def __init__(
+        self,
+        signal: np.ndarray,
+        fs: float,
+        cwt_param: Optional[Dict[str, Any]] = None,
+        gamma: float = 1e-3,
+        fb: float = 5,
+        isSmooth: bool = False,
+        isNumba: bool = False,
+    ) -> None:
         """
-        初始化CWT-SST对象。
+        初始化CWT-SST对象
 
         参数:
-            signal: 输入信号
-            fs: 采样频率
-            cwt_param: CWT参数字典
-            gamma: 幅值阈值
-            fb: 时频线宽度
-            isSmooth: 是否平滑SST结果
+            signal: 输入信号，一维数组
+            fs: 采样频率 (Hz)
+            cwt_param: CWT参数字典，包含小波类型、尺度等设置
+            gamma: 幅值阈值，用于过滤弱信号
+            fb: 时频线宽度 (Hz)，用于脊线提取
+            isSmooth: 是否对SST结果进行平滑处理
             isNumba: 是否使用Numba加速能量重排
         """
         # 默认CWT参数
@@ -158,7 +200,7 @@ class SST_CWT(SST_Base):
         }
         if cwt_param is not None:
             transform_param.update(cwt_param)
-        super().__init__(signal, fs, transform_param, gamma,fb)
+        super().__init__(signal, fs, transform_param, gamma, fb)
         # 检查是否安装了Numba
         if isNumba:
             self.has_numba = self._check_numba()
@@ -166,18 +208,32 @@ class SST_CWT(SST_Base):
             self.has_numba = False
         self.isSmooth = isSmooth  # 是否对SST结果平滑处理
 
-    def _check_numba(self):
-        """检测 numba 是否可用"""
+    def _check_numba(self) -> bool:
+        """
+        检测 numba 是否可用
+
+        返回:
+            True表示numba可用，False表示不可用
+        """
         try:
             from numba import jit
+
             return True
         except ImportError:
             return False
 
     @staticmethod
-    def _get_cwt_scales(fs, scalesType, scalesNum):
+    def _get_cwt_scales(fs: float, scalesType: str, scalesNum: int) -> np.ndarray:
         """
         根据尺度类型和数量生成CWT尺度
+
+        参数:
+            fs: 采样频率
+            scalesType: 尺度类型，'log' 或 'linear'
+            scalesNum: 尺度数量
+
+        返回:
+            CWT尺度数组
         """
         if scalesType == "log":
             log_fn = np.log10(fs / 2)
@@ -194,15 +250,25 @@ class SST_CWT(SST_Base):
         else:
             raise ValueError("未知的尺度类型")
 
-    def transform(self, data, fs, transform_param):
+    def transform(
+        self, data: np.ndarray, fs: float, transform_param: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
-        计算CWT
+        计算连续小波变换(CWT)
+
+        参数:
+            data: 输入信号
+            fs: 采样频率
+            transform_param: CWT参数字典
+
+        返回:
+            CWT结果字典，包含频率轴、时间轴、时频图和尺度
         """
-        from pywt import cwt
+        from pywt import cwt  # 小波变换库
 
         # --------- 1. 边界填充 ---------
         pad_len = len(data) // 10
-        data_padded = np.pad(data, pad_width=pad_len, mode="constant")
+        data_padded = np.pad(data, pad_width=pad_len, mode="symmetric")
         # --------- 2. 生成尺度 ---------
         scales = transform_param["scales"]
         scalesType = transform_param["scalesType"]
@@ -235,9 +301,15 @@ class SST_CWT(SST_Base):
         return result
 
     @staticmethod
-    def _evaluate_tpMap(tp_map):
+    def _evaluate_tpMap(tp_map: np.ndarray) -> float:
         """
         评估时频图的能量集中性
+
+        参数:
+            tp_map: 时频图矩阵
+
+        返回:
+            稀疏度指标，值越大表示能量越集中
         """
         # 使用L1/L2范数计算能量集中性
         Amp = np.abs(tp_map)
@@ -246,9 +318,15 @@ class SST_CWT(SST_Base):
         sparsity = L2 / L1  # 稀疏度
         return sparsity
 
-    def calc_inst_freq(self, method="gradRatio"):
+    def calc_inst_freq(self, method: str = "gradRatio") -> np.ndarray:
         """
         基于CWT计算瞬时频率
+
+        参数:
+            method: 计算方法，'gradRatio' 或 'phaseGrad'
+
+        返回:
+            瞬时频率矩阵，形状为 (n_freq, n_time)
         """
         if self.transform_result is None:
             self.transform_result = self.transform(
@@ -267,9 +345,16 @@ class SST_CWT(SST_Base):
 
         return np.asarray(freq_remap)
 
-    def __calc_inst_freq_gradRatio(self, C_x, t):
+    def __calc_inst_freq_gradRatio(self, C_x: np.ndarray, t: np.ndarray) -> np.ndarray:
         """
         梯度比率方法计算瞬时频率
+
+        参数:
+            C_x: CWT系数矩阵
+            t: 时间轴
+
+        返回:
+            瞬时频率矩阵
         """
         # 计算时间方向梯度
         dC_x = np.gradient(C_x, t, axis=1)
@@ -287,9 +372,16 @@ class SST_CWT(SST_Base):
 
         return freq_remap
 
-    def __calc_inst_freq_phaseGrad(self, C_x, t):
+    def __calc_inst_freq_phaseGrad(self, C_x: np.ndarray, t: np.ndarray) -> np.ndarray:
         """
         相位梯度方法计算瞬时频率
+
+        参数:
+            C_x: CWT系数矩阵
+            t: 时间轴
+
+        返回:
+            瞬时频率矩阵
         """
         # 相位解缠绕
         phase = np.unwrap(np.angle(C_x), axis=1)
@@ -309,9 +401,14 @@ class SST_CWT(SST_Base):
 
         return freq_remap
 
-    def energy_reassign(self):
+    def energy_reassign(self) -> Dict[str, Any]:
         """
         CWT能量重排算法
+
+        将CWT系数按瞬时频率重新分配到正确的频率位置，实现时频压缩
+
+        返回:
+            重排后的时频图字典
         """
         if self.inst_freq is None:
             self.inst_freq = self.calc_inst_freq()
@@ -367,14 +464,19 @@ class SST_CWT(SST_Base):
             "tf_map": sst_tf_map,
         }
 
-    def energy_reassign_numba(self):
+    def energy_reassign_numba(self) -> Dict[str, Any]:
         """
         CWT能量重排算法 - Numba 加速版本
+
+        使用Numba JIT编译加速能量重排过程，适用于大数据量处理
+
+        返回:
+            重排后的时频图字典
         """
         if self.inst_freq is None:
             self.inst_freq = self.calc_inst_freq()
         # 定义 Numba 加速的能量重排核心函数
-        from numba import jit
+        from numba import jit  # JIT编译库
 
         @jit(nopython=True)
         def __energy_reassign_numba_core(inst_freq, tf_map, f_axis):
@@ -409,9 +511,18 @@ class SST_CWT(SST_Base):
             "tf_map": sst_tf_map,
         }
 
-    def smooth_2D(self, data2D, smooth_param=None):
+    def smooth_2D(
+        self, data2D: np.ndarray, smooth_param: Optional[Dict[str, Any]] = None
+    ) -> np.ndarray:
         """
-        对2D数据进行平滑处理
+        对2D时频图进行平滑处理
+
+        参数:
+            data2D: 输入的2D时频图
+            smooth_param: 平滑参数字典
+
+        返回:
+            平滑后的时频图
         """
         # 默认参数
         default_param = {
@@ -424,10 +535,11 @@ class SST_CWT(SST_Base):
             default_param.update(smooth_param)
         method = default_param["method"]
         if method == "gaussian":
-            from scipy.ndimage import gaussian_filter
+            from scipy.ndimage import gaussian_filter  # 高斯滤波
+
             return gaussian_filter(data2D, sigma=default_param["sigma"])
         elif method == "morph":
-            from skimage.morphology import (
+            from skimage.morphology import (  # 形态学处理
                 footprint_rectangle,
                 erosion,
                 opening,
@@ -450,9 +562,14 @@ class SST_CWT(SST_Base):
         else:
             raise ValueError("method must be 'gaussian' or 'morph'")
 
-    def sst(self):
+    def sst(self) -> Dict[str, Any]:
         """
         执行完整的SST变换
+
+        按顺序执行CWT变换、瞬时频率计算、能量重排和可选的平滑处理
+
+        返回:
+            SST变换结果字典，包含压缩后的时频图
         """
         # 能量重排
         if self.sst_result is None:
@@ -486,9 +603,14 @@ class SST_CWT(SST_Base):
             self.sst_result["tf_map"] = smoothed_tf_map
         return self.sst_result
 
-    def evaluate(self):
+    def evaluate(self) -> float:
         """
         评估SST对时频图的集中效果
+
+        通过比较SST前后的稀疏度来量化压缩效果
+
+        返回:
+            稀疏度比率，值大于1表示SST提高了能量集中度
         """
         if self.sst_result is None:
             raise ValueError("请先执行sst()方法获取SST结果")
@@ -499,12 +621,25 @@ class SST_CWT(SST_Base):
         return ratio
 
     def extract_ridges_dbscan(
-        self, amp_thresh_ratio=0.1, db_eps=5, db_min_samples=10, plot=False
-    ):
+        self,
+        amp_thresh_ratio: float = 0.1,
+        db_eps: float = 5,
+        db_min_samples: int = 10,
+        plot: bool = False,
+    ) -> List[np.ndarray]:
         """
         基于DBSCAN聚类的SST频率脊线自动提取
+
+        参数:
+            amp_thresh_ratio: 幅值阈值比例
+            db_eps: DBSCAN聚类的邻域半径
+            db_min_samples: DBSCAN聚类的最小样本数
+            plot: 是否绘制聚类过程图
+
+        返回:
+            频率脊线列表，每个元素为一条脊线的频率时间序列
         """
-        from sklearn.cluster import DBSCAN
+        from sklearn.cluster import DBSCAN  # 聚类算法
 
         if self.sst_result is None:
             raise ValueError("请先执行sst()方法获取SST结果")
@@ -520,17 +655,15 @@ class SST_CWT(SST_Base):
         points = np.stack([idx_t, idx_f], axis=1)  # 修改为[时间索引, 频率索引]
         if plot:
             # 转为真实频率和时间值
-            points_tf = np.array(
-                [
-                    [t_Axis[t], f_Axis[f]] for t, f in points
-                ]
-            )
+            points_tf = np.array([[t_Axis[t], f_Axis[f]] for t, f in points])
             # 绘制提取的点
             plt.figure(figsize=(8, 6))
-            plt.scatter(points_tf[:, 0], points_tf[:, 1], s=10, c='blue', label='提取点')
-            plt.xlabel('时间/s')
-            plt.ylabel('频率/Hz')
-            plt.title('有效待聚类点')
+            plt.scatter(
+                points_tf[:, 0], points_tf[:, 1], s=10, c="blue", label="提取点"
+            )
+            plt.xlabel("时间/s")
+            plt.ylabel("频率/Hz")
+            plt.title("有效待聚类点")
             plt.xlim(0, t_Axis[-1])
             plt.ylim(0, f_Axis[-1])
             plt.grid()
@@ -546,17 +679,17 @@ class SST_CWT(SST_Base):
         points_scaled = np.copy(points).astype(float)
         points_scaled[:, 0] *= time_weight
         points_scaled[:, 1] *= freq_weight
-        db = DBSCAN(eps=db_eps, min_samples=db_min_samples, metric='euclidean')
+        db = DBSCAN(eps=db_eps, min_samples=db_min_samples, metric="euclidean")
         labels = db.fit_predict(points_scaled)
         if plot:
             # 绘制聚类结果
             unique_labels = sorted(set(labels))
             plt.figure(figsize=(8, 6))
             # 使用tab10或tab20色图，区分度更高
-            color_map = plt.get_cmap('tab10' if len(unique_labels) <= 10 else 'tab20')
+            color_map = plt.get_cmap("tab10" if len(unique_labels) <= 10 else "tab20")
             for idx, label in enumerate(unique_labels):
                 if label == -1:
-                    color = 'gray'
+                    color = "gray"
                 else:
                     color = color_map(idx % color_map.N)
                 cluster_points = points_tf[labels == label]
@@ -565,11 +698,11 @@ class SST_CWT(SST_Base):
                     cluster_points[:, 1],
                     s=5,
                     color=color,
-                    label=f'聚类组 {label}' if label != -1 else '噪声点',
+                    label=f"聚类组 {label}" if label != -1 else "噪声点",
                 )
-            plt.xlabel('时间/s')
-            plt.ylabel('频率/Hz')
-            plt.title('DBSCAN聚类结果')
+            plt.xlabel("时间/s")
+            plt.ylabel("频率/Hz")
+            plt.title("DBSCAN聚类结果")
             plt.xlim(0, t_Axis[-1])
             plt.ylim(0, f_Axis[-1])
             plt.grid()
@@ -581,12 +714,14 @@ class SST_CWT(SST_Base):
         for cluster_id in range(n_clusters):
             mask = labels == cluster_id
             cluster_points = points[mask]
+
             # 3. 按时间分组，统计每个时刻的真实频率
             ridge_freq = np.full(T, np.nan)
             for t in np.unique(cluster_points[:, 0]):  # 无聚类点的时刻频率为nan
                 freq_idx = cluster_points[cluster_points[:, 0] == t, 1]
                 freq_val = np.median(f_Axis[freq_idx])  # 中位频率，抗干扰
                 ridge_freq[t] = freq_val
+
             # 4. 去除异常跳变点
             valid_idx = np.where(~np.isnan(ridge_freq))[0]
             for i in range(1, len(valid_idx)):
@@ -609,9 +744,19 @@ class SST_CWT(SST_Base):
         return ridges_freqs
 
     @staticmethod
-    def _freqs_to_idx(fc,fb, f_Axis):
+    def _freqs_to_idx(
+        fc: np.ndarray, fb: np.ndarray, f_Axis: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         将频率范围转换为指定频率轴上的索引范围
+
+        参数:
+            fc: 中心频率数组
+            fb: 频率带宽数组
+            f_Axis: 频率轴
+
+        返回:
+            中心频率索引和带宽索引的元组
         """
         f_low = fc - fb
         f_high = fc + fb
@@ -619,38 +764,44 @@ class SST_CWT(SST_Base):
         f_high_idx = np.searchsorted(f_Axis, f_high, side="right")
         f_low_idx = np.clip(f_low_idx, 0, len(f_Axis) - 1)
         f_high_idx = np.clip(f_high_idx, 0, len(f_Axis) - 1)
-        fc_idx= (f_low_idx + f_high_idx) // 2
+        fc_idx = (f_low_idx + f_high_idx) // 2
         fb_idx = (f_high_idx - f_low_idx) // 2
         return fc_idx, fb_idx
 
-    def reconstruct(self,automode=True, fc=None, fb=None):
+    def reconstruct(
+        self,
+        automode: bool = True,
+        fc: Optional[np.ndarray] = None,
+        fb: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """
         重构信号
 
         参数:
-        -------
-        automode: bool, 是否自动提取频率脊线进行重构
-        fc: array_like, 指定的中心频率列表
-        fb: array_like, 指定的频率带宽列表
+            automode: 是否自动提取频率脊线进行重构
+            fc: 指定的中心频率数组，形状为 (N_mode, N_time)
+            fb: 指定的频率带宽数组，形状为 (N_mode, N_time)
 
         返回:
-        -------
-        recons: 重构后的信号, 形状为 (n_channels, n_samples). 最后分量为残差
+            重构后的信号，形状为 (N_mode, N_time)，最后分量为残差
         """
         if self.sst_result is None:
             raise ValueError("请先执行sst()方法获取SST结果")
         f_Axis = self.sst_result["f_Axis"]
         t_Axis = self.sst_result["t_Axis"]
-        from ssqueezepy import issq_cwt
-        scipy.integrate.trapz = np.trapz# issq_cwt版本bug, 热修复
+        from ssqueezepy import issq_cwt  # SST逆变换库
+        import scipy.integrate
+        scipy.integrate.trapz = np.trapz  # issq_cwt版本bug, 热修复
         # 自动提取频率脊线进行分离重构
         if automode:
-            fc_list=np.asarray(self.extract_ridges_dbscan())
+            fc_list = np.asarray(self.extract_ridges_dbscan())
             fb_list = np.where(np.isnan(fc_list), 0, self.fb)
-            fc_list = np.nan_to_num(fc_list, nan=f_Axis[-1])#nan时刻使用最大频率, 默认无能量
+            fc_list = np.nan_to_num(
+                fc_list, nan=f_Axis[-1]
+            )  # nan时刻使用最大频率, 默认无能量
             if len(fc_list) == 0:
                 raise ValueError("未检测到有效的频率脊线")
-            fc_list,fb_list=self._freqs_to_idx(fc_list, fb_list, f_Axis)
+            fc_list, fb_list = self._freqs_to_idx(fc_list, fb_list, f_Axis)
             # 执行分离重构
             recons = issq_cwt(
                 Tx=self.sst_result["tf_map"],
@@ -660,13 +811,13 @@ class SST_CWT(SST_Base):
             )
             return recons
         # 手动指定频率范围进行分离重构
-        elif fc is None or fb is None:# 不分离, 完整重构
+        elif fc is None or fb is None:  # 不分离, 完整重构
             recons = issq_cwt(
                 Tx=self.sst_result["tf_map"],
                 wavelet="morlet",
             )
-            return np.asarray([recons])# 保持完整重构与分离重构输出形状一致
-        else:# 分离重构
+            return np.asarray([recons])  # 保持完整重构与分离重构输出形状一致
+        else:  # 分离重构
             if fc.ndim == 1 and fb.ndim == 1:
                 fc = fc.reshape(1, -1)
                 fb = fb.reshape(1, -1)
@@ -685,68 +836,139 @@ class SST_CWT(SST_Base):
         return recons
 
 
-
-
-def test_sst_cwt():
+def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
     """
-    测试SST_CWT算法的基本功能
+    测试SST_CWT算法在谐波调频信号上的分离重构能力
+
+    仿真信号为基频100Hz+正弦调频，含1、2倍频谐波
+    进行CWT和SST分析，自动分离重构分量，并分别对重构分量做CWT
+    展示4张图：原始信号、原始信号CWT、分量1 CWT、分量2 CWT
+
+    返回:
+        配置好的SST_CWT对象实例
     """
-    print("测试SST_CWT算法...")
-    
+    print("测试SST_CWT谐波分离重构...")
+
     # 生成测试信号
-    fs = 1000
-    t = np.linspace(0, 2, 2*fs)
+    fs = 2000
+    t = np.linspace(0, 2, 2 * fs)
     PI = np.pi
-    
-    # 调频调幅信号
-    IF = (1 + 0.2*np.cos(2*PI*2*t)) * 100
-    phase = np.cumsum(2*PI*IF/fs)
-    A = (1 + 0.3*np.cos(2*PI*5*t))
-    signal = A * np.cos(phase)
-    
+
+    # 基频调频
+    f0 = 100
+    fm = 10  # 调频幅度
+    IF1 = f0 + fm * np.sin(2 * PI * 2 * t)  # 100Hz基频+正弦调频
+    phase1 = np.cumsum(2 * PI * IF1 / fs)
+    sig1 = np.cos(phase1+PI/4)# 基频调频信号，幅值1.0
+    # 2倍频谐波
+    IF2 = 2 * IF1
+    phase2 = np.cumsum(2 * PI * IF2 / fs)
+    sig2 = 0.7 * np.cos(phase2+ PI / 3)  # 2倍频谐波，幅值0.7
+    # 合成信号
+    signal = sig1 + sig2
+
     # 初始化SST_CWT
-    sst = SST_CWT(signal, fs, cwt_param={"scalesType":"linear","scalesNum":500}, gamma=0.1)
-    
+    sst = SST_CWT(
+        signal, fs, cwt_param={"scalesType": "linear", "scalesNum": 500}, gamma=0.01,fb=10,isSmooth=True
+    )
+
+    # 执行CWT变换
+    sst.transform_result = sst.transform(signal, fs, sst.transform_param)
+    print("原始信号CWT计算完成")
+
     # 执行SST变换
-    result = sst.sst()
+    sst.sst()
+    sst.sst_result["tf_map"] *=0.2 # 缩放幅值, 抵消压缩带来的幅值变化
+    print("原始信号SST计算完成")
+
+    # 评估SST效果
+    sparsity_ratio = sst.evaluate()
+    print(f"SST时频图稀疏度提升比例: {sparsity_ratio:.4f}")
     
-    print(f"变换结果维度: {result['tf_map'].shape}")
-    print(f"时间轴长度: {len(result['t_Axis'])}")
-    print(f"频率轴范围: {result['f_Axis'][0]:.2f} - {result['f_Axis'][-1]:.2f} Hz")
-    print("SST_CWT算法测试完成！")
-    
+    # 自动分离重构
+    recons = sst.reconstruct(automode=True)[:-1]  # 最后一个分量为残差
+    print("自动分离重构完成")
+    print(f"分离模态数量: {len(recons)}")
+
+    # 对个分量分别做CWT
+    def get_cwt(sig):
+        return sst.transform(sig, fs, sst.transform_param)
+    cwt_rec1 = get_cwt(recons[0])
+    print("分量1 CWT计算完成")
+    cwt_rec2 = get_cwt(recons[1])
+    print("分量2 CWT计算完成")
+
+    # 绘制结果
+    print("开始绘制结果...")
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    VMAX=0.5
+    # 原始信号CWT
+    mesh1 = axes[0, 0].pcolormesh(
+        sst.transform_result["t_Axis"],
+        sst.transform_result["f_Axis"],
+        np.abs(sst.transform_result["tf_map"]),
+        vmin=0,
+        vmax= VMAX,
+        cmap="jet",
+        shading="auto",
+    )
+    axes[0, 0].set_title("原始信号CWT")
+    axes[0, 0].set_xlabel("时间/s")
+    axes[0, 0].set_ylabel("频率/Hz")
+    axes[0, 0].set_ylim(0, 300)
+    fig.colorbar(mesh1, ax=axes[0, 0], label="幅值")
+    # 原始信号SST
+    mesh2 = axes[0, 1].pcolormesh(
+        sst.sst_result["t_Axis"],
+        sst.sst_result["f_Axis"],
+        np.abs(sst.sst_result["tf_map"]),
+        vmin=0,
+        vmax= VMAX,
+        cmap="jet",
+        shading="auto",
+    )
+    axes[0, 1].set_title("原始信号SST")
+    axes[0, 1].set_xlabel("时间/s")
+    axes[0, 1].set_ylabel("频率/Hz")
+    axes[0, 1].set_ylim(0, 300)
+    fig.colorbar(mesh2, ax=axes[0, 1], label="幅值")
+    # 分量1 CWT
+    mesh3 = axes[1, 0].pcolormesh(
+        cwt_rec1["t_Axis"],
+        cwt_rec1["f_Axis"],
+        np.abs(cwt_rec1["tf_map"]),
+        vmin=0,
+        vmax= VMAX,
+        cmap="jet",
+        shading="auto",
+    )
+    axes[1, 0].set_title("分量1（基频）重构CWT")
+    axes[1, 0].set_xlabel("时间/s")
+    axes[1, 0].set_ylabel("频率/Hz")
+    axes[1, 0].set_ylim(0, 300)
+    fig.colorbar(mesh3, ax=axes[1, 0], label="幅值")
+    # 分量2 CWT
+    mesh4 = axes[1, 1].pcolormesh(
+        cwt_rec2["t_Axis"],
+        cwt_rec2["f_Axis"],
+        np.abs(cwt_rec2["tf_map"]),
+        vmin=0,
+        vmax= VMAX,
+        cmap="jet",
+        shading="auto",
+    )
+    axes[1, 1].set_title("分量2（2倍频）重构CWT")
+    axes[1, 1].set_xlabel("时间/s")
+    axes[1, 1].set_ylabel("频率/Hz")
+    axes[1, 1].set_ylim(0, 300)
+    fig.colorbar(mesh4, ax=axes[1, 1], label="幅值")
+    plt.tight_layout()
+    plt.show()
+
+    print("SST_CWT谐波分离重构测试完成！")
     return sst
 
 
 if __name__ == "__main__":
     # 运行测试
-    sst_example = test_sst_cwt()
-    
-    # 同时显示两幅图，便于对比
-    import matplotlib.pyplot as plt
-    result_cwt = sst_example.transform_result
-    result_sst = sst_example.sst_result
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    # CWT图
-    mesh1 = axes[0].pcolormesh(
-        result_cwt["t_Axis"], result_cwt["f_Axis"], np.abs(result_cwt["tf_map"]),
-        cmap="jet", shading="auto", vmin=None, vmax=None
-    )
-    axes[0].set_title("CWT时频图测试")
-    axes[0].set_xlabel("时间/s")
-    axes[0].set_ylabel("频率/Hz")
-    axes[0].set_ylim(0, 200)
-    fig.colorbar(mesh1, ax=axes[0], label="幅值")
-    # SST图
-    mesh2 = axes[1].pcolormesh(
-        result_sst["t_Axis"], result_sst["f_Axis"], np.abs(result_sst["tf_map"]),
-        cmap="jet", shading="auto", vmin=None, vmax=None
-    )
-    axes[1].set_title("SST时频图测试")
-    axes[1].set_xlabel("时间/s")
-    axes[1].set_ylabel("频率/Hz")
-    axes[1].set_ylim(0, 200)
-    fig.colorbar(mesh2, ax=axes[1], label="幅值")
-    plt.tight_layout()
-    plt.show()
+    test_sst_cwt_harmonic_reconstruction()
