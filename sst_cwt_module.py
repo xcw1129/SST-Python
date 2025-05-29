@@ -88,6 +88,7 @@ class SST_Base:
                 result = self.transform(
                     self.signal, self.fs, self.transform_param
                 )
+                self.transform_result = result
             else:
                 result = self.transform_result
             title = kwargs.get("title", "CWT时频图")
@@ -135,7 +136,7 @@ class SST_CWT(SST_Base):
     基于CWT的同步压缩变换
     """
 
-    def __init__(self, signal, fs, cwt_param=None, gamma=1e-3,fb=5, isSmooth=False):
+    def __init__(self, signal, fs, cwt_param=None, gamma=1e-3,fb=5, isSmooth=False,isNumba=False):
         """
         初始化CWT-SST对象。
 
@@ -146,6 +147,7 @@ class SST_CWT(SST_Base):
             gamma: 幅值阈值
             fb: 时频线宽度
             isSmooth: 是否平滑SST结果
+            isNumba: 是否使用Numba加速能量重排
         """
         # 默认CWT参数
         transform_param = {
@@ -158,10 +160,9 @@ class SST_CWT(SST_Base):
             transform_param.update(cwt_param)
         super().__init__(signal, fs, transform_param, gamma,fb)
         # 检查是否安装了Numba
-        try:
-            import numba
-            self.has_numba = True
-        except ImportError:
+        if isNumba:
+            self.has_numba = self._check_numba()
+        else:
             self.has_numba = False
         self.isSmooth = isSmooth  # 是否对SST结果平滑处理
 
@@ -498,7 +499,7 @@ class SST_CWT(SST_Base):
         return ratio
 
     def extract_ridges_dbscan(
-        self, amp_thresh_ratio=0.01, db_eps=5, db_min_samples=10, plot=False
+        self, amp_thresh_ratio=0.1, db_eps=5, db_min_samples=10, plot=False
     ):
         """
         基于DBSCAN聚类的SST频率脊线自动提取
@@ -607,23 +608,50 @@ class SST_CWT(SST_Base):
             ridges_freqs.append(ridge_freq)
         return ridges_freqs
 
+    @staticmethod
+    def _freqs_to_idx(fc,fb, f_Axis):
+        """
+        将频率范围转换为指定频率轴上的索引范围
+        """
+        f_low = fc - fb
+        f_high = fc + fb
+        f_low_idx = np.searchsorted(f_Axis, f_low, side="left")
+        f_high_idx = np.searchsorted(f_Axis, f_high, side="right")
+        f_low_idx = np.clip(f_low_idx, 0, len(f_Axis) - 1)
+        f_high_idx = np.clip(f_high_idx, 0, len(f_Axis) - 1)
+        fc_idx= (f_low_idx + f_high_idx) // 2
+        fb_idx = (f_high_idx - f_low_idx) // 2
+        return fc_idx, fb_idx
+
     def reconstruct(self,automode=True, fc=None, fb=None):
         """
         重构信号
+
+        参数:
+        -------
+        automode: bool, 是否自动提取频率脊线进行重构
+        fc: array_like, 指定的中心频率列表
+        fb: array_like, 指定的频率带宽列表
+
+        返回:
+        -------
+        recons: 重构后的信号, 形状为 (n_channels, n_samples). 最后分量为残差
         """
         if self.sst_result is None:
             raise ValueError("请先执行sst()方法获取SST结果")
         f_Axis = self.sst_result["f_Axis"]
         t_Axis = self.sst_result["t_Axis"]
         from ssqueezepy import issq_cwt
-        scipy.integrate.trapz = np.trapz
+        scipy.integrate.trapz = np.trapz# issq_cwt版本bug, 热修复
+        # 自动提取频率脊线进行分离重构
         if automode:
             fc_list=np.asarray(self.extract_ridges_dbscan())
-            fc_list = np.nan_to_num(fc_list, nan=f_Axis[-1])
+            fb_list = np.where(np.isnan(fc_list), 0, self.fb)
+            fc_list = np.nan_to_num(fc_list, nan=f_Axis[-1])#nan时刻使用最大频率, 默认无能量
             if len(fc_list) == 0:
                 raise ValueError("未检测到有效的频率脊线")
-            fb_list=np.full_like(fc_list, self.fb)
-            # 执行重构
+            fc_list,fb_list=self._freqs_to_idx(fc_list, fb_list, f_Axis)
+            # 执行分离重构
             recons = issq_cwt(
                 Tx=self.sst_result["tf_map"],
                 wavelet="morlet",
@@ -631,24 +659,20 @@ class SST_CWT(SST_Base):
                 cw=fb_list.T,
             )
             return recons
-        elif fc is None or fb is None:
+        # 手动指定频率范围进行分离重构
+        elif fc is None or fb is None:# 不分离, 完整重构
             recons = issq_cwt(
                 Tx=self.sst_result["tf_map"],
                 wavelet="morlet",
             )
-        else:
+            return np.asarray([recons])# 保持完整重构与分离重构输出形状一致
+        else:# 分离重构
             if fc.ndim == 1 and fb.ndim == 1:
                 fc = fc.reshape(1, -1)
                 fb = fb.reshape(1, -1)
             if fc.shape[1] == len(t_Axis) and fb.shape[1] == len(t_Axis):
                 # 根据理想频率范围查找对应索引范围
-                f_low, f_high = fc - fb, fc + fb
-                f_low_idx = np.searchsorted(f_Axis, f_low, side="left")
-                f_high_idx = np.searchsorted(f_Axis, f_high, side="right")
-                f_low_idx = np.clip(f_low_idx, 0, len(f_Axis) - 1)
-                f_high_idx = np.clip(f_high_idx, 0, len(f_Axis) - 1)
-                fc_idx = (f_low_idx + f_high_idx) // 2
-                fb_idx = (f_high_idx - f_low_idx) // 2
+                fc_idx, fb_idx = self._freqs_to_idx(fc, fb, f_Axis)
                 # 执行重构
                 recons = issq_cwt(
                     Tx=self.sst_result["tf_map"],
@@ -659,6 +683,8 @@ class SST_CWT(SST_Base):
             else:
                 raise ValueError("fc和fb的时间轴长度必须与SST结果的时间轴长度相同")
         return recons
+
+
 
 
 def test_sst_cwt():
