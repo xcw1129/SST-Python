@@ -38,7 +38,7 @@ class SST_Base:
             fs: 采样频率 (Hz)
             transform_param: 变换参数字典
             gamma: 瞬时频率计算时的幅值阈值
-            fb: 时频线宽度 (Hz)
+            fb: 理想时频线最大宽度 (Hz)
         """
         # 字体和绘图全局设置
         plt.rcParams["font.family"] = "sans-serif"
@@ -174,9 +174,9 @@ class SST_CWT(SST_Base):
         signal: np.ndarray,
         fs: float,
         cwt_param: Optional[Dict[str, Any]] = None,
-        gamma: float = 1e-3,
+        gamma: float = 1e-1,
         fb: float = 5,
-        isSmooth: bool = False,
+        isSmooth: bool = True,
         isNumba: bool = False,
     ) -> None:
         """
@@ -196,7 +196,7 @@ class SST_CWT(SST_Base):
             "wavelet": "cmor10-1",  # 复Morlet小波
             "scales": None,  # 默认尺度
             "scalesType": "log",  # 默认尺度范围
-            "scalesNum": 64,  # 默认尺度数量
+            "scalesNum": 500,  # 默认尺度数量
         }
         if cwt_param is not None:
             transform_param.update(cwt_param)
@@ -223,7 +223,9 @@ class SST_CWT(SST_Base):
             return False
 
     @staticmethod
-    def _get_cwt_scales(fs: float,N:int, scalesType: str, scalesNum: int) -> np.ndarray:
+    def _get_cwt_scales(
+        fs: float, N: int, scalesType: str, scalesNum: int
+    ) -> np.ndarray:
         """
         根据尺度类型和数量生成CWT尺度
 
@@ -235,15 +237,13 @@ class SST_CWT(SST_Base):
         返回:
             CWT尺度数组
         """
-        fn= fs / 2  # Nyquist频率
-        f_min=5*fs / N  # 最小频率, 保证有意义的尺度
+        fn = fs / 2  # Nyquist频率
+        f_min = 5 * fs / N  # 最小频率, 保证有意义的尺度
         # f: 5Δf~ fn
         if scalesType == "log":
             log_fn = np.log10(fn)
-            log_f_min=np.log10(f_min) 
-            log_f_Axis = np.linspace(
-                log_f_min, log_fn, scalesNum
-            )
+            log_f_min = np.log10(f_min)
+            log_f_Axis = np.linspace(log_f_min, log_fn, scalesNum)
             f_Axis = np.power(10, log_f_Axis)  # 生成对数尺度
             scales = fs / f_Axis[::-1]  # 计算增序尺度
             return scales
@@ -278,7 +278,7 @@ class SST_CWT(SST_Base):
         scalesType = transform_param["scalesType"]
         scalesNum = transform_param["scalesNum"]
         if scales is None:
-            scales = self._get_cwt_scales(fs,len(data), scalesType, scalesNum)
+            scales = self._get_cwt_scales(fs, len(data), scalesType, scalesNum)
         wavelet = transform_param["wavelet"]  # 小波类型
         t_Axis = np.arange(len(data)) / fs  # 时间轴
         # --------- 3. 计算CWT ---------
@@ -367,7 +367,7 @@ class SST_CWT(SST_Base):
         magnitude = np.abs(C_x)
         threshold = self.gamma * np.max(magnitude)
         mask = magnitude >= threshold
-        
+
         # 计算瞬时频率
         freq_remap = np.full_like(C_x, np.nan, dtype=float)
         if np.any(mask):
@@ -375,7 +375,7 @@ class SST_CWT(SST_Base):
             # 频率合理性检查
             valid_freq_mask = (inst_freq > 0) & (inst_freq < self.fs / 2)
             freq_remap[mask] = np.where(valid_freq_mask, inst_freq, np.nan)
-        
+
         return freq_remap
 
     def __calc_inst_freq_phaseGrad(self, C_x: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -427,34 +427,49 @@ class SST_CWT(SST_Base):
             sst_tf_map = np.zeros_like(self.transform_result["tf_map"], dtype=complex)
         else:
             # 预过滤频率范围
-            f_min, f_max = self.transform_result["f_Axis"][0], self.transform_result["f_Axis"][-1]
+            f_min, f_max = (
+                self.transform_result["f_Axis"][0],
+                self.transform_result["f_Axis"][-1],
+            )
             freq_range_mask = (self.inst_freq >= f_min) & (self.inst_freq <= f_max)
             valid_mask = valid_mask & freq_range_mask
-            
+
             if not np.any(valid_mask):
-                sst_tf_map = np.zeros_like(self.transform_result["tf_map"], dtype=complex)
+                sst_tf_map = np.zeros_like(
+                    self.transform_result["tf_map"], dtype=complex
+                )
             else:
                 valid_freq_remap = self.inst_freq[valid_mask]
                 valid_coeffs = self.transform_result["tf_map"][valid_mask]
                 valid_indices = np.where(valid_mask)
                 time_indices = valid_indices[1]
-                
+
                 # 查找最近的频率索引
                 freq_indices = np.searchsorted(
                     self.transform_result["f_Axis"], valid_freq_remap, side="left"
                 )
-                freq_indices = np.clip(freq_indices, 0, len(self.transform_result["f_Axis"]) - 1)
-                
+                freq_indices = np.clip(
+                    freq_indices, 0, len(self.transform_result["f_Axis"]) - 1
+                )
+
                 # 向量化最近邻计算
                 left_indices = np.maximum(freq_indices - 1, 0)
-                left_dist = np.abs(valid_freq_remap - self.transform_result["f_Axis"][left_indices])
-                right_dist = np.abs(valid_freq_remap - self.transform_result["f_Axis"][freq_indices])
-                freq_indices = np.where(left_dist < right_dist, left_indices, freq_indices)
-                
-                sst_tf_map = np.zeros_like(self.transform_result["tf_map"], dtype=complex)
+                left_dist = np.abs(
+                    valid_freq_remap - self.transform_result["f_Axis"][left_indices]
+                )
+                right_dist = np.abs(
+                    valid_freq_remap - self.transform_result["f_Axis"][freq_indices]
+                )
+                freq_indices = np.where(
+                    left_dist < right_dist, left_indices, freq_indices
+                )
+
+                sst_tf_map = np.zeros_like(
+                    self.transform_result["tf_map"], dtype=complex
+                )
                 # 一维向量按目标索引向二维矩阵向量化累加操作
                 np.add.at(sst_tf_map, (freq_indices, time_indices), valid_coeffs)
-        
+
         return {
             "f_Axis": self.transform_result["f_Axis"],  # 保持与原始CWT一致的轴
             "t_Axis": self.transform_result["t_Axis"],
@@ -499,7 +514,9 @@ class SST_CWT(SST_Base):
                         # 比较左右邻居距离
                         left = idx - 1
                         right = idx
-                        if abs(f_axis[left] - freq_remap) <= abs(f_axis[right] - freq_remap):
+                        if abs(f_axis[left] - freq_remap) <= abs(
+                            f_axis[right] - freq_remap
+                        ):
                             freq_idx = left
                         else:
                             freq_idx = right
@@ -593,7 +610,11 @@ class SST_CWT(SST_Base):
             if self.has_numba:
                 try:
                     self.sst_result = self.energy_reassign_numba()
-                except Exception as e:  # numba加速失败, 使用普通方法
+                except Exception as e:  # numba加速失败,
+                    print(
+                        "Numba加速失败，使用默认能量重排方法: ",
+                        e,
+                    )
                     self.sst_result = self.energy_reassign()
             else:
                 self.sst_result = self.energy_reassign()
@@ -727,8 +748,10 @@ class SST_CWT(SST_Base):
             ridge_freq = np.full(T, np.nan)
             time_indices = []
             freq_values = []
-            for t in np.unique(cluster_points[:, 0]): # 无聚类点的时刻频率为nan
-                freq_idx = cluster_points[cluster_points[:, 0] == t, 1]# 提取同一时刻所有点频率索引
+            for t in np.unique(cluster_points[:, 0]):  # 无聚类点的时刻频率为nan
+                freq_idx = cluster_points[
+                    cluster_points[:, 0] == t, 1
+                ]  # 提取同一时刻所有点频率索引
                 # 使用加权平均，权重为对应点的幅值
                 weights = tf_map[freq_idx, t]
                 freq_val = np.average(f_Axis[freq_idx], weights=weights)
@@ -739,7 +762,10 @@ class SST_CWT(SST_Base):
             # 4. 使用中值滤波, 去除异常频率
             if len(time_indices) > 3:
                 from scipy.signal import medfilt
-                filtered_freqs = medfilt(np.array(freq_values), kernel_size=min(5, len(freq_values)))
+
+                filtered_freqs = medfilt(
+                    np.array(freq_values), kernel_size=min(5, len(freq_values))
+                )
                 for i, t in enumerate(time_indices):
                     ridge_freq[t] = filtered_freqs[i]
             ridges_freqs.append(ridge_freq)
@@ -793,6 +819,7 @@ class SST_CWT(SST_Base):
         t_Axis = self.sst_result["t_Axis"]
         from ssqueezepy import issq_cwt  # SST逆变换库
         import scipy.integrate
+
         scipy.integrate.trapz = np.trapz  # issq_cwt版本bug, 热修复
         # 自动提取频率脊线进行分离重构
         if automode:
@@ -861,18 +888,16 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
     fm = 10  # 调频幅度
     IF1 = f0 + fm * np.sin(2 * PI * 2 * t)  # 100Hz基频+正弦调频
     phase1 = np.cumsum(2 * PI * IF1 / fs)
-    sig1 = np.cos(phase1+PI/4)# 基频调频信号，幅值1.0
+    sig1 = np.cos(phase1 + PI / 4)  # 基频调频信号，幅值1.0
     # 2倍频谐波
     IF2 = 2 * IF1
     phase2 = np.cumsum(2 * PI * IF2 / fs)
-    sig2 = 0.7 * np.cos(phase2+ PI / 3)  # 2倍频谐波，幅值0.7
+    sig2 = 0.7 * np.cos(phase2 + PI / 3)  # 2倍频谐波，幅值0.7
     # 合成信号
     signal = sig1 + sig2
 
     # 初始化SST_CWT
-    sst = SST_CWT(
-        signal, fs, cwt_param={"scalesType": "linear", "scalesNum": 500}, gamma=0.01,fb=10,isSmooth=True
-    )
+    sst = SST_CWT(signal, fs)# 测试默认参数配置
 
     # 执行CWT变换
     sst.transform_result = sst.transform(signal, fs, sst.transform_param)
@@ -880,13 +905,13 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
 
     # 执行SST变换
     sst.sst()
-    sst.sst_result["tf_map"] *=0.2 # 缩放幅值, 抵消压缩带来的幅值变化
+    sst.sst_result["tf_map"] *= 0.2  # 缩放幅值, 抵消压缩带来的幅值变化
     print("原始信号SST计算完成")
 
     # 评估SST效果
     sparsity_ratio = sst.evaluate()
     print(f"SST时频图稀疏度提升比例: {sparsity_ratio:.4f}")
-    
+
     # 自动分离重构
     recons = sst.reconstruct(automode=True)[:-1]  # 最后一个分量为残差
     print("自动分离重构完成")
@@ -895,6 +920,7 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
     # 对个分量分别做CWT
     def get_cwt(sig):
         return sst.transform(sig, fs, sst.transform_param)
+
     cwt_rec1 = get_cwt(recons[0])
     print("分量1 CWT计算完成")
     cwt_rec2 = get_cwt(recons[1])
@@ -903,14 +929,14 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
     # 绘制结果
     print("开始绘制结果...")
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    VMAX=0.5
+    VMAX = 0.5
     # 原始信号CWT
     mesh1 = axes[0, 0].pcolormesh(
         sst.transform_result["t_Axis"],
         sst.transform_result["f_Axis"],
         np.abs(sst.transform_result["tf_map"]),
         vmin=0,
-        vmax= VMAX,
+        vmax=VMAX,
         cmap="jet",
         shading="auto",
     )
@@ -925,7 +951,7 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
         sst.sst_result["f_Axis"],
         np.abs(sst.sst_result["tf_map"]),
         vmin=0,
-        vmax= VMAX,
+        vmax=VMAX,
         cmap="jet",
         shading="auto",
     )
@@ -940,7 +966,7 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
         cwt_rec1["f_Axis"],
         np.abs(cwt_rec1["tf_map"]),
         vmin=0,
-        vmax= VMAX,
+        vmax=VMAX,
         cmap="jet",
         shading="auto",
     )
@@ -955,7 +981,7 @@ def test_sst_cwt_harmonic_reconstruction() -> SST_CWT:
         cwt_rec2["f_Axis"],
         np.abs(cwt_rec2["tf_map"]),
         vmin=0,
-        vmax= VMAX,
+        vmax=VMAX,
         cmap="jet",
         shading="auto",
     )
